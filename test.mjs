@@ -84,7 +84,7 @@ await check('宿主入口存在且可导入', async () => {
   const full = resolve(root, typeof rel === 'string' ? rel : rel.default)
   const mod = await import(`file://${full.replace(/\\/g, '/')}`)
   assert.equal(mod.name, 'archived-sessions')
-  assert.deepEqual(mod.inject, ['webServer', 'loader'])
+  assert.deepEqual(mod.inject, ['connection', 'loader'])
   assert.equal(typeof mod.apply, 'function')
 })
 
@@ -115,10 +115,12 @@ function createCtx(registry) {
     logger: { info() {}, warn() {} },
     effect: (fn) => (typeof fn === 'function' ? fn() : undefined),
     loader: { entries: () => [] },
-    webServer: {
-      register: (route) => {
-        ctx.routes.push(route)
-        return () => {}
+    connection: {
+      fetch: {
+        register: (route) => {
+          ctx.routes.push(route)
+          return () => {}
+        }
       }
     }
   }
@@ -128,12 +130,13 @@ function createCtx(registry) {
 async function call(ctx, action, init = {}) {
   const route = ctx.routes[0]
   assert.ok(route, '没有注册路由')
-  const request = new Request(`http://127.0.0.1${route.path}/${action}${init.query ?? ''}`, {
+  const url = `dsh-app://app${route.path}/${action}${init.query ?? ''}`
+  const request = new Request(url, {
     method: init.method ?? 'GET',
     headers: init.body === undefined ? undefined : { 'content-type': 'application/json' },
     body: init.body === undefined ? undefined : JSON.stringify(init.body)
   })
-  const response = await route.handler(request)
+  const response = await route.fetch(request)
   const text = await response.text()
   return { status: response.status, body: text === '' ? undefined : JSON.parse(text) }
 }
@@ -165,27 +168,30 @@ const host = await import(`file://${resolve(root, 'lib/index.mjs').replace(/\\/g
 
 await check('parseRequest 兼容 dsh-app:// 自定义 scheme', () => {
   const cases = [
-    ['dsh-app://app/x-archived-sessions/list', 'list'],
-    ['http://127.0.0.1:50057/x-archived-sessions/list', 'list'],
-    ['/x-archived-sessions/list', 'list'],
-    ['dsh-app://app/x-archived-sessions/unarchive', 'unarchive'],
-    ['dsh-app://app/x-archived-sessions/list/', 'list'],
-    ['dsh-app://app/x-archived-sessions/list#frag', 'list']
+    ['dsh-app://app/api/archived-sessions/list', 'list'],
+    ['http://127.0.0.1:50057/api/archived-sessions/list', 'list'],
+    ['/api/archived-sessions/list', 'list'],
+    ['dsh-app://app/api/archived-sessions/unarchive', 'unarchive'],
+    ['dsh-app://app/api/archived-sessions/list/', 'list'],
+    ['dsh-app://app/api/archived-sessions/list#frag', 'list']
   ]
   for (const [url, expected] of cases) {
     const { action } = host.__test.parseRequest({ url })
     assert.equal(action, expected, `${url} 解析成 ${JSON.stringify(action)}`)
   }
-  const { searchParams } = host.__test.parseRequest({ url: 'dsh-app://app/x-archived-sessions/claim?token=a-b' })
+  const { searchParams } = host.__test.parseRequest({ url: 'dsh-app://app/api/archived-sessions/claim?token=a-b' })
   assert.equal(searchParams.get('token'), 'a-b')
 })
 
-await check('路由注册在 /x-archived-sessions 前缀上（避开 /api 兜底鉴权）', () => {
+await check('路由注册在 connection.fetch 通道的 /api/archived-sessions 前缀上', () => {
   const ctx = createCtx(createRegistry([]))
   host.apply(ctx)
   assert.equal(ctx.routes.length, 1)
-  assert.equal(ctx.routes[0].kind, 'prefix')
-  assert.equal(ctx.routes[0].path, '/x-archived-sessions')
+  assert.equal(ctx.routes[0].path, '/api/archived-sessions')
+  assert.ok(Array.isArray(ctx.routes[0].methods) && ctx.routes[0].methods.includes('GET'))
+  assert.equal(typeof ctx.routes[0].fetch, 'function')
+  // 确认没有再碰 webServer（那条路渲染进程到不了）
+  assert.equal(ctx.webServer, undefined)
 })
 
 await check('list 按最后活动倒序并带展示信息', async () => {
