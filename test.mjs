@@ -97,6 +97,7 @@ await check('client.apply 注册 main 与 sidebar.panellist', () => {
   const injected = []
   const ctx = {
     effect: (fn) => fn(),
+    remote: { $on: () => () => {} },
     locale: { register: () => () => {}, bind: (namespace) => (key) => `${namespace}.${key}` },
     slots: {
       inject: (name, factory) => {
@@ -108,6 +109,52 @@ await check('client.apply 注册 main 与 sidebar.panellist', () => {
   }
   client.apply(ctx)
   assert.deepEqual(injected.sort(), ['main', 'sidebar.panellist'])
+})
+
+// 客户端插件有两份依赖清单，命名空间不同、绝不能混写：
+//   - package.json > dsh.client.inject：写**包名**，供 client-modules 排加载顺序
+//   - lib/client.js > exports.inject：写**服务名**（短名），供 cordis 做服务注入
+// 把包名写进 exports.inject，cordis 永远等不到同名服务，插件恒 pending，
+// web boot 报 "entry did not activate"，整个前端起不来（0.3.1 / 0.4.0 各踩一次）。
+// 官方参照 dsh-client-ui-plugin-manager：exports.inject 是
+// ["slots","locale","remote","remote.pluginManager",...] 这类短名。
+await check('exports.inject 是服务名（短名），包名混进去会让 web boot 卡死', () => {
+  const client = loadClientBundle()
+  for (const name of client.inject) {
+    assert.ok(!name.startsWith('@') && !name.includes('/'),
+      `"${name}" 是包名不是服务名；exports.inject 必须写短名（如 locale、slots、remote）`)
+  }
+})
+
+await check('exports.inject 覆盖 apply 里用到的全部服务', () => {
+  const client = loadClientBundle()
+  const source = read('lib/client.js')
+  const used = new Set()
+  for (const match of source.matchAll(/ctx\.([a-zA-Z_$][\w$]*)/g)) {
+    const service = match[1]
+    // effect 是生命周期钩子，不算服务；ctx.remote?.workspace 这类子路径
+    // 由 "remote" 与 "remote.workspace" 共同覆盖。
+    if (service === 'effect') continue
+    used.add(service)
+  }
+  assert.ok(used.size > 0, '没从源码里识别出任何服务调用，正则可能失效')
+  for (const service of used) {
+    assert.ok(client.inject.includes(service),
+      `apply() 用到 ctx.${service} 但 exports.inject 缺少 "${service}"，会一直 pending`)
+  }
+  assert.ok(client.inject.includes('remote.workspace'),
+    '数据走 ctx.remote.workspace，需按官方写法声明子服务 "remote.workspace"')
+})
+
+await check('dsh.client.inject 是包名且覆盖 RPC 与侧栏依赖', () => {
+  const list = pkg.dsh?.client?.inject ?? []
+  assert.ok(list.length > 0, '声明了 dsh.client 就必须列出依赖包')
+  for (const name of list) {
+    assert.ok(name.includes('/'), `"${name}" 是服务名不是包名；dsh.client.inject 必须写包名`)
+  }
+  assert.ok(list.includes('@deepseek-ai/dsh-api-remotes'), '缺 api-remotes → ctx.remote.workspace 不存在')
+  assert.ok(list.includes('@deepseek-ai/dsh-client-locale'), '缺 locale → ctx.locale 调用会 pending')
+  assert.ok(list.includes('@deepseek-ai/dsh-client-ui-sidebar'), '缺 sidebar → 没有侧栏入口')
 })
 
 await check('数据源订阅 workspace 帧且恢复走官方 RPC', () => {
