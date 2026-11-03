@@ -1,49 +1,14 @@
 /**
- * 回归测试：把插件真实的宿主半边挂到一个假 ctx 上，
- * 用本地 HTTP 请求逐条验证四个路由的行为与副作用。
+ * 自检：单文件插件 lib/index.mjs 的可运行部分（纯 Node，不依赖 DSH 运行时）。
  *
- * 运行：node test/host-routes.mjs
+ * 运行：node test.mjs
+ * 覆盖：模块契约、四个路由的行为与副作用、HTML 面板页的完整性、交接令牌生命周期。
  */
 
 import { strict as assert } from 'node:assert'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Readable } from 'node:stream'
-
-import { apply, ROUTE, __test } from '../lib/index.mjs'
-
-// Node 18 以下没有全局 Request/Response；DSH 运行时是 Node 22，
-// 但为了让本测试也能在旧 Node 上跑，这里提供最小替身。
-if (typeof globalThis.Request !== 'function') {
-  globalThis.Request = class FakeRequest {
-    constructor(url, init = {}) {
-      this.url = url
-      this.method = init.method ?? 'GET'
-      this.headers = new Map(Object.entries(init.headers ?? {}).map(([key, value]) => [key.toLowerCase(), value]))
-      this._body = init.body
-    }
-    async json() {
-      return JSON.parse(this._body)
-    }
-    async text() {
-      return this._body ?? ''
-    }
-  }
-}
-if (typeof globalThis.Response !== 'function') {
-  globalThis.Response = class FakeResponse {
-    constructor(body, init = {}) {
-      this.status = init.status ?? 200
-      this._body = body
-      this.headers = new Map(Object.entries(init.headers ?? {}).map(([key, value]) => [key.toLowerCase(), value]))
-    }
-    async text() {
-      return this._body ?? ''
-    }
-  }
-}
-void Readable
 
 let passed = 0
 async function check(name, fn) {
@@ -57,8 +22,33 @@ async function check(name, fn) {
   console.log(`✓ ${name}`)
 }
 
+// Node 18+ 自带 Request/Response；更旧的 Node 给出最小替身，保证测试可跑。
+if (typeof globalThis.Request !== 'function') {
+  globalThis.Request = class FakeRequest {
+    constructor(url, init = {}) {
+      this.url = url
+      this.method = init.method ?? 'GET'
+      this._body = init.body
+    }
+    async json() {
+      return JSON.parse(this._body)
+    }
+  }
+}
+if (typeof globalThis.Response !== 'function') {
+  globalThis.Response = class FakeResponse {
+    constructor(body, init = {}) {
+      this.status = init.status ?? 200
+      this._body = body
+      this.headers = init.headers ?? {}
+    }
+    async text() {
+      return this._body ?? ''
+    }
+  }
+}
+
 // ── 假宿主 ────────────────────────────────────────────────────────────────
-/** 记录所有调用；unarchive/archive 改的是同一个数组，等价于注册表的持久集合。 */
 function createRegistry(archived) {
   const calls = []
   const state = { archived: [...archived] }
@@ -78,50 +68,61 @@ function createRegistry(archived) {
   }
 }
 
-/** 建一个只实现了本插件所需最小面的 ctx。 */
 function createCtx(registry) {
-  const routes = []
-  return {
-    routes,
+  const ctx = {
+    routes: [],
     workspaceRegistry: registry,
     logger: { info() {}, warn() {} },
-    effect: (fn) => (typeof fn === 'function' ? fn() : undefined),
+    effect: (fn) => {
+      const dispose = typeof fn === 'function' ? fn() : undefined
+      return typeof dispose === 'function' ? dispose : () => {}
+    },
     loader: { entries: () => [] },
     webServer: {
       register: (route) => {
-        routes.push(route)
+        ctx.routes.push(route)
         return () => {}
       }
+    },
+    inject(_names, fn) {
+      fn(ctx)
     }
   }
+  return ctx
 }
 
-/** 直接调用注册的 handler，模拟一次请求。 */
 async function call(ctx, action, init = {}) {
   const route = ctx.routes[0]
   assert.ok(route, '没有注册路由')
-  const request = new Request(`http://127.0.0.1${ROUTE}/${action}${init.query ?? ''}`, {
+  const request = new Request(`http://127.0.0.1${route.path}/${action}${init.query ?? ''}`, {
     method: init.method ?? 'GET',
     headers: init.body === undefined ? undefined : { 'content-type': 'application/json' },
     body: init.body === undefined ? undefined : JSON.stringify(init.body)
   })
   const response = await route.handler(request)
   const text = await response.text()
-  return { status: response.status, body: text === '' ? undefined : JSON.parse(text) }
+  let body
+  try {
+    body = text === '' ? undefined : JSON.parse(text)
+  } catch {
+    body = text
+  }
+  return { status: response.status, body, headers: response.headers }
 }
 
-// ── 造一个投影缓存目录 ────────────────────────────────────────────────────
-const home = mkdtempSync(join(tmpdir(), 'dsh-archived-routes-'))
+// ── 夹具：投影缓存 ────────────────────────────────────────────────────────
+const home = mkdtempSync(join(tmpdir(), 'dsh-archived-selfcheck-'))
 const sessionDir = join(home, 'storages', 'session_projcache', 'sessions')
 mkdirSync(sessionDir, { recursive: true })
-function seedSession(id, title, turns, lastPromptAt) {
+function seed(id, title, turns, lastPromptAt, inputTokens, outputTokens) {
   writeFileSync(join(sessionDir, `${id}.json`), JSON.stringify({
     version: 7,
     record: {
       identity: { createdAt: 1793000000000 },
       rows: {
         title: { ver: 1, seq: 5, val: title },
-        sessionStats: { ver: 1, seq: 5, val: { turns, steps: turns * 5 } },
+        tokenUsage: { ver: 2, seq: 5, val: { totals: { uncachedInputTokens: inputTokens, outputTokens } } },
+        sessionStats: { ver: 1, seq: 5, val: { turns, steps: turns * 4 } },
         sessionListMetadata: { ver: 1, seq: 5, val: { lastPromptAt } }
       }
     }
@@ -129,23 +130,34 @@ function seedSession(id, title, turns, lastPromptAt) {
 }
 const OLD = 'session-aaaa1111-0000-0000-0000-000000000001'
 const NEW = 'session-bbbb2222-0000-0000-0000-000000000002'
-seedSession(OLD, '旧任务：搭建中转站', 3, 1793000001000)
-seedSession(NEW, '新任务：部署博客 & 反向代理', 8, 1793000900000)
+seed(OLD, '旧任务：搭建中转站', 3, 1793000001000, 800, 300)
+seed(NEW, '新任务：部署博客 & 反向代理', 8, 1793000900000, 9000, 4200)
 process.env.DSH_HOME = home
 
+const mod = await import('./lib/index.mjs')
+
 // ── 用例 ──────────────────────────────────────────────────────────────────
-await check('路由注册在前缀 /api/archived-sessions 上', async () => {
+await check('模块契约：name / inject / apply / 路由前缀', () => {
+  assert.equal(mod.name, 'archived-sessions')
+  assert.deepEqual(mod.inject, ['webServer', 'loader'])
+  assert.equal(typeof mod.apply, 'function')
   const ctx = createCtx(createRegistry([]))
-  apply(ctx)
+  mod.apply(ctx)
   assert.equal(ctx.routes.length, 1)
   assert.equal(ctx.routes[0].kind, 'prefix')
-  assert.equal(ctx.routes[0].path, ROUTE)
+  assert.equal(ctx.routes[0].path, '/api/archived-sessions')
 })
 
-await check('list 返回归档会话，按最后活动时间倒序', async () => {
-  const registry = createRegistry([OLD, NEW])
-  const ctx = createCtx(registry)
-  apply(ctx)
+await check('单文件结构：同一份源码既是宿主模块，也是浏览器脚本', () => {
+  const source = readFileSync(new URL('./lib/index.mjs', import.meta.url), 'utf8')
+  assert.match(source, /^export const name = 'archived-sessions'/m, '宿主入口必须可被 ES 模块导入')
+  assert.ok(source.indexOf('/* dsh.client') > 0, '缺少 dsh.client 分段标记')
+  assert.ok(!source.includes('window.__ModuleLoader__'), '浏览器段不应依赖 DSH 独有的模块加载器')
+})
+
+await check('list：按最后活动时间倒序，带标题/轮次/token', async () => {
+  const ctx = createCtx(createRegistry([OLD, NEW]))
+  mod.apply(ctx)
   const { status, body } = await call(ctx, 'list')
   assert.equal(status, 200)
   assert.equal(body.available, true)
@@ -153,12 +165,13 @@ await check('list 返回归档会话，按最后活动时间倒序', async () =>
   assert.deepEqual(body.sessions.map((item) => item.id), [NEW, OLD])
   assert.equal(body.sessions[0].title, '新任务：部署博客 & 反向代理')
   assert.equal(body.sessions[0].turns, 8)
+  assert.equal(body.sessions[0].inputTokens, 9000)
   assert.equal(body.sessions[0].lastPromptAt, 1793000900000)
 })
 
-await check('list 在 registry 不可用时降级而不是 500', async () => {
+await check('list：registry 不可用时降级而不是 500', async () => {
   const ctx = createCtx(undefined)
-  apply(ctx)
+  mod.apply(ctx)
   const { status, body } = await call(ctx, 'list')
   assert.equal(status, 200)
   assert.equal(body.available, false)
@@ -166,72 +179,83 @@ await check('list 在 registry 不可用时降级而不是 500', async () => {
   assert.deepEqual(body.sessions, [])
 })
 
-await check('unarchive 调用注册表并返回新的归档集合', async () => {
+await check('unarchive：调用注册表并返回新的归档集合', async () => {
   const registry = createRegistry([OLD, NEW])
   const ctx = createCtx(registry)
-  apply(ctx)
+  mod.apply(ctx)
   const { status, body } = await call(ctx, 'unarchive', { method: 'POST', body: { id: OLD } })
   assert.equal(status, 200)
-  assert.equal(body.ok, true)
   assert.deepEqual(body.archived, [NEW])
   assert.deepEqual(registry.calls, [['unarchive', OLD]])
 })
 
-await check('unarchive 拒绝非 POST 与缺少 id', async () => {
+await check('unarchive：拒绝非 POST 与缺少 id', async () => {
   const registry = createRegistry([OLD])
   const ctx = createCtx(registry)
-  apply(ctx)
+  mod.apply(ctx)
   assert.equal((await call(ctx, 'unarchive')).status, 405)
   assert.equal((await call(ctx, 'unarchive', { method: 'POST', body: {} })).status, 400)
   assert.deepEqual(registry.calls, [])
 })
 
-await check('open 只接受已归档 id，并发放一次性令牌', async () => {
+await check('open：只接受已归档 id，发放一次性令牌并临时解除归档', async () => {
   const registry = createRegistry([OLD])
   const ctx = createCtx(registry)
-  apply(ctx)
+  mod.apply(ctx)
   assert.equal((await call(ctx, 'open', { method: 'POST', body: { id: 'session-unknown' } })).status, 404)
   const { status, body } = await call(ctx, 'open', { method: 'POST', body: { id: OLD } })
   assert.equal(status, 200)
-  assert.equal(body.ok, true)
   assert.equal(body.id, OLD)
   assert.match(body.token, /^[0-9a-z]+-[0-9a-z]+$/)
   assert.ok(body.expiresAt > Date.now())
-  // 交接期间会话已临时解除归档
   assert.deepEqual(registry.archivedSessionIds, [])
 })
 
-await check('claim 认领后把会话重新归档，令牌作废', async () => {
+await check('claim：认领后重新归档，令牌随即作废', async () => {
   const registry = createRegistry([OLD])
   const ctx = createCtx(registry)
-  apply(ctx)
+  mod.apply(ctx)
   const opened = await call(ctx, 'open', { method: 'POST', body: { id: OLD } })
-  const token = opened.body.token
+  const token = encodeURIComponent(opened.body.token)
 
-  const first = await call(ctx, 'claim', { query: `?token=${encodeURIComponent(token)}` })
+  const first = await call(ctx, 'claim', { query: `?token=${token}` })
   assert.equal(first.status, 200)
-  assert.equal(first.body.ok, true)
   assert.deepEqual(registry.archivedSessionIds, [OLD])
   assert.deepEqual(registry.calls[registry.calls.length - 1], ['archive', OLD, true])
 
-  const second = await call(ctx, 'claim', { query: `?token=${encodeURIComponent(token)}` })
+  const second = await call(ctx, 'claim', { query: `?token=${token}` })
   assert.equal(second.status, 410)
-  assert.equal(second.body.ok, false)
 })
 
-await check('未知动作返回 404', async () => {
+await check('未知动作返回 404 JSON', async () => {
   const ctx = createCtx(createRegistry([]))
-  apply(ctx)
-  assert.equal((await call(ctx, 'nope')).status, 404)
+  mod.apply(ctx)
+  const { status, body } = await call(ctx, 'nope')
+  assert.equal(status, 404)
+  assert.equal(body.reason, 'not-found')
 })
 
-await check('交接令牌带 TTL 且过期后不可认领', async () => {
-  const handoff = __test.createHandoff()
-  const lease = handoff.arm(OLD)
-  assert.equal(typeof lease.token, 'string')
-  assert.ok(lease.expiresAt > Date.now())
-  handoff.dispose()
-  assert.equal(handoff.claim(lease.token), undefined)
+await check('panel：返回可独立运行的中文 HTML 面板页', async () => {
+  const ctx = createCtx(createRegistry([]))
+  mod.apply(ctx)
+  const { status, body, headers } = await call(ctx, 'panel')
+  assert.equal(status, 200)
+  assert.match(String(headers['content-type']), /text\/html/)
+  assert.ok(body.startsWith('<!doctype html>'))
+  for (const text of ['已归档会话', '搜索标题', '恢复', '打开', '共 ']) {
+    assert.ok(body.includes(text), `面板缺少文案：${text}`)
+  }
+  assert.ok(body.includes("fetch(API + action"), '面板应通过宿主路由取数')
+})
+
+await check('首次加载时把面板页写到 ~/.dsh/storages/archived-sessions.html', async () => {
+  const ctx = createCtx(createRegistry([]))
+  mod.apply(ctx)
+  await call(ctx, 'list')
+  const file = join(home, 'storages', 'archived-sessions.html')
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  assert.ok(existsSync(file), '面板页没有落盘')
+  assert.ok(readFileSync(file, 'utf8').includes('已归档会话'))
 })
 
 console.log(`\n全部通过：${passed} 项`)

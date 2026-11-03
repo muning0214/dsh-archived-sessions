@@ -1,12 +1,11 @@
 {
   "name": "dsh-archived-sessions",
-  "version": "0.1.0",
-  "description": "DeepSeek Harness 插件：在侧栏提供「已归档会话」面板，可搜索、查看并一键恢复归档任务",
+  "version": "0.2.0",
+  "description": "DeepSeek Harness 插件：补一个「已归档会话」面板，归档之后仍然找得到、能搜索、能恢复",
   "type": "module",
   "main": "./lib/index.mjs",
   "exports": {
     ".": "./lib/index.mjs",
-    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "files": [
@@ -15,6 +14,9 @@
     "README.md",
     "LICENSE"
   ],
+  "scripts": {
+    "test": "node test.mjs"
+  },
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",
@@ -30,10 +32,7 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web",
-      "inject": [
-        "@deepseek-ai/dsh-client-ui-sidebar"
-      ]
+      "platform": "web"
     }
   }
 }
