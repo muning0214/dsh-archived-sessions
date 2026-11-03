@@ -107,7 +107,12 @@ async function call(ctx, action, init = {}) {
   } catch {
     body = text
   }
-  return { status: response.status, body, headers: response.headers }
+  // Node 18+ 的 Response.headers 是 Headers 实例，只支持 .get()；
+  // 早期替身实现给的是普通对象，这里统一摊平成普通对象，断言可以直接取键。
+  const headers = typeof response.headers?.get === 'function'
+    ? Object.fromEntries(response.headers)
+    : response.headers
+  return { status: response.status, body, headers }
 }
 
 // ── 夹具：投影缓存 ────────────────────────────────────────────────────────
@@ -153,6 +158,22 @@ await check('单文件结构：同一份源码既是宿主模块，也是浏览�
   assert.match(source, /^export const name = 'archived-sessions'/m, '宿主入口必须可被 ES 模块导入')
   assert.ok(source.indexOf('/* dsh.client') > 0, '缺少 dsh.client 分段标记')
   assert.ok(!source.includes('window.__ModuleLoader__'), '浏览器段不应依赖 DSH 独有的模块加载器')
+})
+
+// 宿主 dsh-client-modules 的硬约束：只要 packages.json 声明了 dsh.client
+// （platform: 'web'），就必须同时导出 ./client，否则它在 ClientModuleRegistry
+// 构造期抛错，modules 是 required 插件，整个宿主 startup failed——应用直接打不开。
+await check('清单契约：dsh.client 必须与 exports["./client"] 成对出现', () => {
+  const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
+  const declared = pkg.dsh?.client?.platform === 'web'
+  const exported = pkg.exports?.['./client'] !== undefined
+  assert.equal(
+    declared,
+    exported,
+    declared
+      ? '声明了 dsh.client 却没有 exports["./client"]，会让宿主启动失败'
+      : '导出了 ./client 却没声明 dsh.client'
+  )
 })
 
 await check('list：按最后活动时间倒序，带标题/轮次/token', async () => {

@@ -1,6 +1,6 @@
 {
   "name": "dsh-archived-sessions",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "DeepSeek Harness 插件：补一个「已归档会话」面板，归档之后仍然找得到、能搜索、能恢复",
   "type": "module",
   "main": "./lib/index.mjs",
@@ -30,9 +30,6 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web"
     }
   }
 }
