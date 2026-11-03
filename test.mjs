@@ -163,12 +163,29 @@ process.env.DSH_HOME = home
 
 const host = await import(`file://${resolve(root, 'lib/index.mjs').replace(/\\/g, '/')}`)
 
-await check('路由注册在 /api/archived-sessions 前缀上', () => {
+await check('parseRequest 兼容 dsh-app:// 自定义 scheme', () => {
+  const cases = [
+    ['dsh-app://app/x-archived-sessions/list', 'list'],
+    ['http://127.0.0.1:50057/x-archived-sessions/list', 'list'],
+    ['/x-archived-sessions/list', 'list'],
+    ['dsh-app://app/x-archived-sessions/unarchive', 'unarchive'],
+    ['dsh-app://app/x-archived-sessions/list/', 'list'],
+    ['dsh-app://app/x-archived-sessions/list#frag', 'list']
+  ]
+  for (const [url, expected] of cases) {
+    const { action } = host.__test.parseRequest({ url })
+    assert.equal(action, expected, `${url} 解析成 ${JSON.stringify(action)}`)
+  }
+  const { searchParams } = host.__test.parseRequest({ url: 'dsh-app://app/x-archived-sessions/claim?token=a-b' })
+  assert.equal(searchParams.get('token'), 'a-b')
+})
+
+await check('路由注册在 /x-archived-sessions 前缀上（避开 /api 兜底鉴权）', () => {
   const ctx = createCtx(createRegistry([]))
   host.apply(ctx)
   assert.equal(ctx.routes.length, 1)
   assert.equal(ctx.routes[0].kind, 'prefix')
-  assert.equal(ctx.routes[0].path, '/api/archived-sessions')
+  assert.equal(ctx.routes[0].path, '/x-archived-sessions')
 })
 
 await check('list 按最后活动倒序并带展示信息', async () => {
