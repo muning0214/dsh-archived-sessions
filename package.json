@@ -1,7 +1,7 @@
 {
   "name": "dsh-archived-sessions",
-  "version": "0.4.1",
-  "description": "DeepSeek Harness 插件：补一个「已归档会话」面板，归档之后仍然找得到、能搜索、能恢复",
+  "version": "0.8.0",
+  "description": "DeepSeek Harness 已归档会话面板：搜索、查看交互、恢复与确认后永久删除",
   "type": "module",
   "main": "./lib/index.mjs",
   "exports": {
@@ -36,6 +36,8 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-client-ui-sidebar"
